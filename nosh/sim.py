@@ -32,8 +32,9 @@ class NoshGraphSimulation:
         self.new_seller_kwargs = new_seller_kwargs
 
         self.current_time_step = 0
-        self.agent_id_counter = 0
         self.total_supply = 0
+        self.buyer_agent_id_counter = 1
+        self.seller_agent_id_counter = 1
 
         if weight_update_fn is None:
             self.compute_updated_weight = self.default_weight_update_fn
@@ -42,23 +43,23 @@ class NoshGraphSimulation:
 
         for buyer_kwargs in initial_buyers_kwargs:
             buyer_agent = BuyerAgent(
-                agent_id=self.agent_id_counter, 
+                agent_id=self.buyer_agent_id_counter, 
                 rng=self.rng,
                 **buyer_kwargs
             )
             self.buyer_agents[buyer_agent.agent_id] = buyer_agent
             self.graph.add_node(buyer_agent, bipartite=0, type='buyer')
-            self.agent_id_counter += 1
+            self.buyer_agent_id_counter += 1
 
         for seller_kwargs in initial_sellers_kwargs:
             seller_agent = SellerAgent(
-                agent_id=self.agent_id_counter, 
+                agent_id=self.seller_agent_id_counter, 
                 rng=self.rng,
                 **seller_kwargs
             )
             self.seller_agents[seller_agent.agent_id] = seller_agent
             self.graph.add_node(seller_agent, bipartite=1, type='seller')
-            self.agent_id_counter += 1
+            self.seller_agent_id_counter += 1
 
     def default_weight_update_fn(self, current_weight, transaction_value):
         return current_weight + transaction_value
@@ -130,22 +131,22 @@ class NoshGraphSimulation:
         # determine whether to add a buyer or seller node
         if self.rng.random() < 0.5:
             new_agent = BuyerAgent(
-                agent_id=self.agent_id_counter, 
+                agent_id=self.buyer_agent_id_counter, 
                 rng=self.rng,
                 **self.new_buyer_kwargs
             )
             self.graph.add_node(new_agent, bipartite=0, type='buyer')
             self.buyer_agents[new_agent.agent_id] = new_agent
+            self.buyer_agent_id_counter += 1
         else:
             new_agent = SellerAgent(
-                agent_id=self.agent_id_counter, 
+                agent_id=self.seller_agent_id_counter, 
                 rng=self.rng,
                 **self.new_seller_kwargs
             )
             self.graph.add_node(new_agent, bipartite=1, type='seller')
             self.seller_agents[new_agent.agent_id] = new_agent
-        
-        self.agent_id_counter += 1
+            self.seller_agent_id_counter += 1
 
     def delete_node(self):
         # Determine randomly whether to delete a buyer or seller node
@@ -242,18 +243,17 @@ class NoshGraphSimulation:
         
         # compute eigenvector centrality for all the nodes in the graph
         try:
-            ec = nx.eigenvector_centrality(self.graph)
+            ec_full = nx.eigenvector_centrality(self.graph)
         except nx.PowerIterationFailedConvergence:
-            ec = {node: 0 for node in self.graph.nodes()}
-        print(ec)
+            ec_full = {node: 0 for node in self.graph.nodes()}
+        
 
         seller_agents = list(self.seller_agents.values())
         seller2value = {}
         seller2weight = {}
         seller2totalweight = {}
+        ec = {}
         for seller_agent in seller_agents:
-            seller_id = seller_agent.agent_id
-
             buyer_edges = self.graph.edges(seller_agent, data=True)
             buyer2weight = {}
             total_weight = 0
@@ -269,15 +269,20 @@ class NoshGraphSimulation:
                 buyer2weight[buyer_agent] = w
                 total_weight += w
 
-            seller2weight[seller_id] = buyer2weight
-            seller2totalweight[seller_id] = total_weight
-            seller2value[seller_id] = total_weight + ec[seller_agent]
+            seller2weight[seller_agent] = buyer2weight
+            seller2totalweight[seller_agent] = total_weight
+            seller2value[seller_agent] = np.mean([total_weight, ec_full[seller_agent]])
+            ec[seller_agent] = ec_full[seller_agent]
+            # TODO: once we have a notion of total "value", we can compute it iteratively for each time-step
+            # seller2value[seller_id] = ec[seller_agent]
 
         self.graph_evolution_metrics.append({
             'time_step': self.current_time_step,
             'seller2value': seller2value,
-            'eigenvector_centrality': ec,
+            'seller2eigenvectorcentrality': ec,  # only keep the seller agent's eigenvector centrality
             'seller2weight': seller2weight,
             'seller2totalweight': seller2totalweight,
-            'total_supply': self.total_supply
+            'total_supply': self.total_supply,
+            'buyer_agent_id_counter': self.buyer_agent_id_counter,
+            'seller_agent_id_counter': self.seller_agent_id_counter
         })
