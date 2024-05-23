@@ -190,14 +190,18 @@ class NoshGraphSimulation:
         nx.draw_networkx_edge_labels(self.graph, pos, edge_labels=edge_labels, ax=ax, font_color='red')
         ax.set_title("Bipartite Graph Visualization")
 
-    def run(self, num_time_steps, add_delete_maintain_probs, create_video=False):
-        frame_folder = 'frames'
-        if not os.path.exists(frame_folder):
-            os.makedirs(frame_folder, exist_ok=True)
+    def run(self, num_time_steps: int, add_delete_maintain_probs: np.ndarray, alpha_vec: np.ndarray, create_video:bool=False):
+        assert add_delete_maintain_probs.shape == (num_time_steps,3), "add_delete_maintain_probs must be a 2D array of length 3"
+        assert alpha_vec.shape == (num_time_steps,), "alpha_vec must be a 1D array of length num_time_steps"
+
+        if create_video:
+            frame_folder = 'frames'
+            if not os.path.exists(frame_folder):
+                os.makedirs(frame_folder, exist_ok=True)
 
         for ii in range(num_time_steps):
-            self.record_graph_metrics()
-            self.evolve_graph(add_delete_maintain_probs)
+            self.record_graph_metrics(alpha_vec[ii])
+            self.evolve_graph(add_delete_maintain_probs[ii,:])
             self.current_time_step += 1
 
             if create_video:
@@ -237,17 +241,13 @@ class NoshGraphSimulation:
 
         return seller_buyer_weights
     
-    def record_graph_metrics(self):
-        # TODO: implement this function
-        # for now, the value is defined as the sum of the eigenvector centrality and the total weight of the edges for a particular seller node
-        
+    def record_graph_metrics(self, alpha):
         # compute eigenvector centrality for all the nodes in the graph
         try:
             ec_full = nx.eigenvector_centrality(self.graph)
         except nx.PowerIterationFailedConvergence:
             ec_full = {node: 0 for node in self.graph.nodes()}
         
-
         seller_agents = list(self.seller_agents.values())
         seller2value = {}
         seller2weight = {}
@@ -271,10 +271,8 @@ class NoshGraphSimulation:
 
             seller2weight[seller_agent] = buyer2weight
             seller2totalweight[seller_agent] = total_weight
-            seller2value[seller_agent] = np.mean([total_weight, ec_full[seller_agent]])
+            seller2value[seller_agent] = total_weight * (ec_full[seller_agent] ** alpha)
             ec[seller_agent] = ec_full[seller_agent]
-            # TODO: once we have a notion of total "value", we can compute it iteratively for each time-step
-            # seller2value[seller_id] = ec[seller_agent]
 
         self.graph_evolution_metrics.append({
             'time_step': self.current_time_step,
