@@ -64,6 +64,12 @@ class NoshGraphSimulation:
     def default_weight_update_fn(self, current_weight, transaction_value):
         return current_weight + transaction_value
     
+    def step_all_agents(self):
+        for buyer_agent in self.buyer_agents.values():
+            buyer_agent.step()
+        for seller_agent in self.seller_agents.values():
+            seller_agent.step()
+            
     def evolve_graph(self, add_delete_maintain_probs):
         add_prob, delete_prob, maintain_prob = add_delete_maintain_probs
         
@@ -74,8 +80,13 @@ class NoshGraphSimulation:
         elif prob < add_prob + delete_prob:
             self.delete_node()
 
+        # update internal state of all agents
+        self.step_all_agents()
+
         # Simulate transactions and update weights
         # for each buyer and seller, determine if they will transact:
+        # Note that the value of the transaction is symmetric in this current representation,
+        #  but we can make it asymmetric later on.
         for buyer_agent in self.buyer_agents.values():
             for seller_agent in self.seller_agents.values():
                 if buyer_agent.will_transact() and seller_agent.will_transact():
@@ -83,15 +94,22 @@ class NoshGraphSimulation:
                     if transaction_value:
                         edge = (buyer_agent, seller_agent)
                         if self.graph.has_edge(*edge):
-                            self.graph.edges[edge]['weight'] = self.compute_updated_weight(self.graph.edges[edge]['weight'], transaction_value)
+                            weight_update_value = self.compute_updated_weight(self.graph.edges[edge]['seller_weight'], transaction_value)
+                            self.graph.edges[edge]['seller_weight'] = weight_update_value
+                            self.graph.edges[edge]['buyer_weight'] = weight_update_value
                         else:
-                            self.graph.add_edge(*edge, weight=self.compute_updated_weight(0, transaction_value))
+                            weight_update_value = self.compute_updated_weight(0, transaction_value)
+                            self.graph.add_edge(
+                                *edge, 
+                                seller_weight=weight_update_value,
+                                buyer_weight=weight_update_value
+                            )
 
-        # simulate whether any sellers exchange some graph weight for tokens
+        # simulate whether any sellers exchange some graph seller_weight for tokens
         for seller_agent in self.seller_agents.values():
             if seller_agent.will_unstake():
                 # get all the buyers that the seller has an edge with and associated weights in a dictionary
-                # NOTE: edges are added in the format (buyer, seller, weight=...)
+                # NOTE: edges are added in the format (buyer, seller, seller_weight=...)
                 #       However, when querying the graph for edges, the format is
                 #       (querying_node, found_node, data)
                 #       This isn't documented clearly (atleast to me) in NetworkX, so
@@ -108,23 +126,25 @@ class NoshGraphSimulation:
                     elif counterparty_agent == seller_agent:
                         buyer_agent = query_agent
                     # get the transaction value from the edge data
-                    buyer2weight[buyer_agent] = edge_data['weight']
+                    buyer2weight[buyer_agent] = edge_data['seller_weight']
                 if len(buyer2weight) > 0:
                     buyer2burn = seller_agent.get_unstake_amount(buyer2weight)
                     # buyer2burn is a dictionary of how much to burn from each buyer that this seller is connected to
                     total_burned = 0
                     for buyer_to_burn, amount in buyer2burn.items():
                         burn_amount = amount
-                        self.graph.edges[(buyer_to_burn, seller_agent)]['weight'] -= burn_amount
+                        self.graph.edges[(buyer_to_burn, seller_agent)]['seller_weight'] -= burn_amount
                         
                         total_burned += burn_amount
                     
                     # update the token balance of the seller
                     tokens_added = self.compute_minting(seller_agent, total_burned)
-                    # The seller exchanges some graph weight for tokens
+                    # The seller exchanges some graph seller_weight for tokens
                     # TODO: need to have a callback to update the seller's token balance and compute it in the correct way
                     seller_agent.num_tokens += tokens_added
                     self.total_supply += tokens_added
+            
+            # TODO: can add unstaking with buyers also, now that we have a concept of buyers being able to mint tokens
 
     def add_node(self):
         
@@ -177,7 +197,8 @@ class NoshGraphSimulation:
         agent_labels = {node: node.agent_id for node in self.graph.nodes()}
         
         # Extract edge weights for labeling
-        edge_labels = {(u, v): self.graph.edges[u, v]['weight'] for u, v in self.graph.edges()}
+        # TODO: can add in buyer weight here for viz
+        edge_labels = {(u, v): self.graph.edges[u, v]['seller_weight'] for u, v in self.graph.edges()}
         
         # Get the nodes involved in edges
         nodes_in_edges = set(sum(self.graph.edges(), ()))
@@ -190,9 +211,19 @@ class NoshGraphSimulation:
         nx.draw_networkx_edge_labels(self.graph, pos, edge_labels=edge_labels, ax=ax, font_color='red')
         ax.set_title("Bipartite Graph Visualization")
 
-    def run(self, num_time_steps: int, add_delete_maintain_probs: np.ndarray, alpha_vec: np.ndarray, create_video:bool=False):
+    def run(
+            self, 
+            num_time_steps: int,
+            add_delete_maintain_probs: np.ndarray,
+            weight_alpha_vec: np.ndarray,
+            ec_alpha_vec: np.ndarray,
+            reputation_alpha_vec: np.ndarray,
+            create_video:bool=False
+        ):
         assert add_delete_maintain_probs.shape == (num_time_steps,3), "add_delete_maintain_probs must be a 2D array of length 3"
-        assert alpha_vec.shape == (num_time_steps,), "alpha_vec must be a 1D array of length num_time_steps"
+        assert weight_alpha_vec.shape == (num_time_steps,), "weight_alpha_vec must be a 1D array of length num_time_steps"
+        assert ec_alpha_vec.shape == (num_time_steps,), "ec_alpha_vec must be a 1D array of length num_time_steps"
+        assert reputation_alpha_vec.shape == (num_time_steps,), "reputation_alpha_vec must be a 1D array of length num_time_steps"
 
         if create_video:
             frame_folder = 'frames'
@@ -200,7 +231,7 @@ class NoshGraphSimulation:
                 os.makedirs(frame_folder, exist_ok=True)
 
         for ii in range(num_time_steps):
-            self.record_graph_metrics(alpha_vec[ii])
+            self.record_graph_metrics(weight_alpha_vec[ii], ec_alpha_vec[ii], reputation_alpha_vec[ii])
             self.evolve_graph(add_delete_maintain_probs[ii,:])
             self.current_time_step += 1
 
@@ -224,26 +255,31 @@ class NoshGraphSimulation:
         # TODO: update based on the function we choose
         return total_burned
 
-    def compute_seller2buyer_weights(self):
-        """
-        Get a dictionary mapping each seller's ID to a dictionary of buyer IDs and the weight of the edge connecting them.
-        """
-        seller_buyer_weights = {}
+    # def compute_seller2buyer_weights(self):
+    #     """
+    #     Get a dictionary mapping each seller's ID to a dictionary of buyer IDs and the seller_weight of the edge connecting them.
+    #     """
+    #     seller2buyer_weights = {}
 
-        for seller_agent in self.seller_agents.values():
-            seller_id = seller_agent.agent_id
-            seller_buyer_weights[seller_id] = {}
+    #     for seller_agent in self.seller_agents.values():
+    #         seller_id = seller_agent.agent_id
+    #         seller2buyer_weights[seller_id] = {}
 
-            for buyer_agent in self.buyer_agents.values():
-                buyer_id = buyer_agent.agent_id
-                edge_weight = self.graph.get_edge_data(seller_agent, buyer_agent, default={'weight': 0})['weight']
-                seller_buyer_weights[seller_id][buyer_id] = edge_weight
+    #         for buyer_agent in self.buyer_agents.values():
+    #             buyer_id = buyer_agent.agent_id
+    #             edge_weight = self.graph.get_edge_data(
+    #                 seller_agent, 
+    #                 buyer_agent, 
+    #                 default={'seller_weight': 0})['seller_weight']
+    #             seller2buyer_weights[seller_id][buyer_id] = edge_weight
 
-        return seller_buyer_weights
+    #     return seller2buyer_weights
     
-    def record_graph_metrics(self, alpha):
+    def record_graph_metrics(self, weight_alpha, ec_alpha, reputation_alpha):
         # compute eigenvector centrality for all the nodes in the graph
         try:
+            # NOTE: this computes the EC using an adjacency matrix with binary entries
+            #       since the weight argument is not provided!
             ec_full = nx.eigenvector_centrality(self.graph)
         except nx.PowerIterationFailedConvergence:
             ec_full = {node: 0 for node in self.graph.nodes()}
@@ -252,10 +288,10 @@ class NoshGraphSimulation:
         seller2value = {}
         seller2weight = {}
         seller2totalweight = {}
-        ec = {}
+        seller2ec = {}
         for seller_agent in seller_agents:
             buyer_edges = self.graph.edges(seller_agent, data=True)
-            buyer2weight = {}
+            sellers_buyer2weight = {}
             total_weight = 0
             for query_agent, counterparty_agent, edge_data in buyer_edges:
                 # Read the note above - this is extra overhead to ensure that
@@ -265,21 +301,51 @@ class NoshGraphSimulation:
                 elif counterparty_agent == seller_agent:
                     buyer_agent = query_agent
                 # get the transaction value from the edge data
-                w = edge_data['weight']
-                buyer2weight[buyer_agent] = w
+                w = edge_data['seller_weight']
+                sellers_buyer2weight[buyer_agent] = w
                 total_weight += w
 
-            seller2weight[seller_agent] = buyer2weight
+            seller2weight[seller_agent] = sellers_buyer2weight
             seller2totalweight[seller_agent] = total_weight
-            seller2value[seller_agent] = total_weight * (ec_full[seller_agent] ** alpha)
-            ec[seller_agent] = ec_full[seller_agent]
+            seller2value[seller_agent] = (total_weight ** weight_alpha) * (ec_full[seller_agent] ** ec_alpha) * (seller_agent.get_current_reputation() ** reputation_alpha)
+            seller2ec[seller_agent] = ec_full[seller_agent]
+
+        buyer_agents = list(self.seller_agents.values())
+        buyer2value = {}
+        buyer2weight = {}
+        buyer2totalweight = {}
+        buyer2ec = {}
+        for buyer_agent in buyer_agents:
+            seller_edges = self.graph.edges(buyer_agent, data=True)
+            buyers_seller2weight = {}
+            total_weight = 0
+            for query_agent, counterparty_agent, edge_data in seller_edges:
+                # Read the note above - this is extra overhead to ensure that
+                # we get the correct counterparty node
+                if query_agent == buyer_agent:
+                    seller_agent = counterparty_agent
+                elif counterparty_agent == buyer_agent:
+                    seller_agent = query_agent
+                # get the transaction value from the edge data
+                w = edge_data['buyer_weight']
+                buyers_seller2weight[buyer_agent] = w
+                total_weight += w
+
+            buyer2weight[buyer_agent] = buyers_seller2weight
+            buyer2totalweight[buyer_agent] = total_weight
+            buyer2value[buyer_agent] = (total_weight ** weight_alpha) * (ec_full[buyer_agent] ** ec_alpha) * (buyer_agent.get_current_reputation() ** reputation_alpha)
+            buyer2ec[buyer_agent] = ec_full[buyer_agent]
 
         self.graph_evolution_metrics.append({
             'time_step': self.current_time_step,
             'seller2value': seller2value,
-            'seller2eigenvectorcentrality': ec,  # only keep the seller agent's eigenvector centrality
+            'seller2eigenvectorcentrality': seller2ec,
             'seller2weight': seller2weight,
             'seller2totalweight': seller2totalweight,
+            'buyer2value': buyer2value,
+            'buyer2eigenvectorcentrality': buyer2ec,
+            'buyer2weight': buyer2weight,
+            'buyer2totalweight': buyer2totalweight,
             'total_supply': self.total_supply,
             'buyer_agent_id_counter': self.buyer_agent_id_counter,
             'seller_agent_id_counter': self.seller_agent_id_counter
