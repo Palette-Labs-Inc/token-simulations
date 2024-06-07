@@ -280,7 +280,13 @@ class NoshGraphSimulation:
         try:
             # NOTE: this computes the EC using an adjacency matrix with binary entries
             #       since the weight argument is not provided!
-            ec_full = nx.eigenvector_centrality(self.graph)
+            # NOTE: the max_iter and tol arguments are set to avoid the PowerIterationFailedConvergence exception
+            ec_full = nx.eigenvector_centrality(
+                self.graph,
+                max_iter=1000,
+                tol=1e-2,
+                weight=None
+            )
         except nx.PowerIterationFailedConvergence:
             ec_full = {node: 0 for node in self.graph.nodes()}
         
@@ -336,6 +342,9 @@ class NoshGraphSimulation:
             buyer2value[buyer_agent] = (total_weight ** weight_alpha) * (ec_full[buyer_agent] ** ec_alpha) * (buyer_agent.get_current_reputation() ** reputation_alpha)
             buyer2ec[buyer_agent] = ec_full[buyer_agent]
 
+        num_total_buyers = len(self.buyer_agents)
+        num_total_sellers = len(self.seller_agents)
+
         self.graph_evolution_metrics.append({
             'time_step': self.current_time_step,
             'seller2value': seller2value,
@@ -348,5 +357,7 @@ class NoshGraphSimulation:
             'buyer2totalweight': buyer2totalweight,
             'total_supply': self.total_supply,
             'buyer_agent_id_counter': self.buyer_agent_id_counter,
-            'seller_agent_id_counter': self.seller_agent_id_counter
+            'seller_agent_id_counter': self.seller_agent_id_counter,
+            'num_total_buyers': num_total_buyers,
+            'num_total_sellers': num_total_sellers
         })
