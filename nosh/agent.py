@@ -36,7 +36,6 @@ class Agent:
                 'scale': 2,
             }
         else:
-
             assert 'shape' in transaction_draw_kwargs
             assert 'scale' in transaction_draw_kwargs
         # seed reputation process
@@ -65,3 +64,4 @@ class Agent:
             shape=self.transaction_draw_kwargs['shape'],
             scale=self.transaction_draw_kwargs['scale']
         )
+        # return 1  # can be usefl to isolate effects ... TODO: programmatically control this

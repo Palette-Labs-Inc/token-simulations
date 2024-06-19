@@ -4,9 +4,17 @@ import os
 import matplotlib.pyplot as plt
 import subprocess
 import numpy as np
+from tqdm.auto import tqdm
+import scipy.stats as stats
 
 from nosh.buyer_agent import BuyerAgent
 from nosh.producer_agent import SellerAgent
+
+def mt_linear(gt, t, m=1):
+    return gt * (t*m)
+
+def mt_exp(gt, t, alpha=0.05):
+    return gt * np.exp(alpha*t)
 
 class NoshGraphSimulation:
     def __init__(
@@ -15,6 +23,7 @@ class NoshGraphSimulation:
             initial_sellers_kwargs, 
             new_buyer_kwargs,
             new_seller_kwargs,
+            mt_callback=mt_linear,
             min_buyers=2, 
             min_sellers=2, 
             seed=None, 
@@ -23,6 +32,7 @@ class NoshGraphSimulation:
         self.graph = nx.Graph()
         self.buyer_agents = {}
         self.seller_agents = {}
+        self.mt_callback = mt_callback
         self.min_buyers = min_buyers
         self.min_sellers = min_sellers
         self.rng = np.random.default_rng(seed)
@@ -32,7 +42,7 @@ class NoshGraphSimulation:
         self.new_seller_kwargs = new_seller_kwargs
 
         self.current_time_step = 0
-        self.total_supply = 0
+        self.total_minted_tokens = 0
         self.buyer_agent_id_counter = 1
         self.seller_agent_id_counter = 1
 
@@ -138,16 +148,15 @@ class NoshGraphSimulation:
                         total_burned += burn_amount
                     
                     # update the token balance of the seller
-                    tokens_added = self.compute_minting(seller_agent, total_burned)
+                    tokens_added = self.mt_callback(total_burned, self.current_time_step)
                     # The seller exchanges some graph seller_weight for tokens
                     # TODO: need to have a callback to update the seller's token balance and compute it in the correct way
                     seller_agent.num_tokens += tokens_added
-                    self.total_supply += tokens_added
+                    self.total_minted_tokens += tokens_added
             
             # TODO: can add unstaking with buyers also, now that we have a concept of buyers being able to mint tokens
 
     def add_node(self):
-        
         # determine whether to add a buyer or seller node
         if self.rng.random() < 0.5:
             new_agent = BuyerAgent(
@@ -182,6 +191,21 @@ class NoshGraphSimulation:
                 return
 
         node_to_remove = self.rng.choice(possible_nodes_to_remove)
+
+        # convert the node's graph value to tokens, and add it to the total supply
+        if delete_buyer:
+            # TODO: include weight removal for buyer ... but currently sim is focused on seller
+            pass
+        else:
+            total_seller_weight = 0
+            buyer_edges = self.graph.edges(node_to_remove, data=True)
+            for query_agent, counterparty_agent, edge_data in buyer_edges:
+                total_seller_weight += edge_data['seller_weight']
+            # update the token balance of the seller
+            tokens_added = self.mt_callback(total_seller_weight, self.current_time_step)
+            # no need to update the sellers token balance, since they will be removed!    
+            self.total_minted_tokens += tokens_added
+
         self.graph.remove_node(node_to_remove)
         if delete_buyer:
             self.buyer_agents.pop(node_to_remove.agent_id, None)
@@ -218,7 +242,8 @@ class NoshGraphSimulation:
             weight_alpha_vec: np.ndarray,
             ec_alpha_vec: np.ndarray,
             reputation_alpha_vec: np.ndarray,
-            create_video:bool=False
+            create_video:bool=False,
+            verbose:bool=False
         ):
         assert add_delete_maintain_probs.shape == (num_time_steps,3), "add_delete_maintain_probs must be a 2D array of length 3"
         assert weight_alpha_vec.shape == (num_time_steps,), "weight_alpha_vec must be a 1D array of length num_time_steps"
@@ -230,7 +255,7 @@ class NoshGraphSimulation:
             if not os.path.exists(frame_folder):
                 os.makedirs(frame_folder, exist_ok=True)
 
-        for ii in range(num_time_steps):
+        for ii in tqdm(range(num_time_steps), disable = not verbose):
             self.record_graph_metrics(weight_alpha_vec[ii], ec_alpha_vec[ii], reputation_alpha_vec[ii])
             self.evolve_graph(add_delete_maintain_probs[ii,:])
             self.current_time_step += 1
@@ -250,30 +275,6 @@ class NoshGraphSimulation:
             print("Video created: output.mp4")
 
         return self.graph_evolution_metrics
-
-    def compute_minting(self, producer_agent, total_burned):
-        # TODO: update based on the function we choose
-        return total_burned
-
-    # def compute_seller2buyer_weights(self):
-    #     """
-    #     Get a dictionary mapping each seller's ID to a dictionary of buyer IDs and the seller_weight of the edge connecting them.
-    #     """
-    #     seller2buyer_weights = {}
-
-    #     for seller_agent in self.seller_agents.values():
-    #         seller_id = seller_agent.agent_id
-    #         seller2buyer_weights[seller_id] = {}
-
-    #         for buyer_agent in self.buyer_agents.values():
-    #             buyer_id = buyer_agent.agent_id
-    #             edge_weight = self.graph.get_edge_data(
-    #                 seller_agent, 
-    #                 buyer_agent, 
-    #                 default={'seller_weight': 0})['seller_weight']
-    #             seller2buyer_weights[seller_id][buyer_id] = edge_weight
-
-    #     return seller2buyer_weights
     
     def record_graph_metrics(self, weight_alpha, ec_alpha, reputation_alpha):
         # compute eigenvector centrality for all the nodes in the graph
@@ -283,11 +284,12 @@ class NoshGraphSimulation:
             # NOTE: the max_iter and tol arguments are set to avoid the PowerIterationFailedConvergence exception
             ec_full = nx.eigenvector_centrality(
                 self.graph,
-                max_iter=1000,
-                tol=1e-2,
-                weight=None
+                max_iter=3000,
+                tol=1e-1,
+                weight='seller_weight'
             )
         except nx.PowerIterationFailedConvergence:
+            print('Convergence Failed! Setting all EC values to 0')
             ec_full = {node: 0 for node in self.graph.nodes()}
         
         seller_agents = list(self.seller_agents.values())
@@ -295,6 +297,7 @@ class NoshGraphSimulation:
         seller2weight = {}
         seller2totalweight = {}
         seller2ec = {}
+        seller2degree = {}
         for seller_agent in seller_agents:
             buyer_edges = self.graph.edges(seller_agent, data=True)
             sellers_buyer2weight = {}
@@ -315,12 +318,14 @@ class NoshGraphSimulation:
             seller2totalweight[seller_agent] = total_weight
             seller2value[seller_agent] = (total_weight ** weight_alpha) * (ec_full[seller_agent] ** ec_alpha) * (seller_agent.get_current_reputation() ** reputation_alpha)
             seller2ec[seller_agent] = ec_full[seller_agent]
+            seller2degree[seller_agent] = self.graph.degree(seller_agent)
 
         buyer_agents = list(self.seller_agents.values())
         buyer2value = {}
         buyer2weight = {}
         buyer2totalweight = {}
         buyer2ec = {}
+        buyer2degree = {}
         for buyer_agent in buyer_agents:
             seller_edges = self.graph.edges(buyer_agent, data=True)
             buyers_seller2weight = {}
@@ -341,9 +346,15 @@ class NoshGraphSimulation:
             buyer2totalweight[buyer_agent] = total_weight
             buyer2value[buyer_agent] = (total_weight ** weight_alpha) * (ec_full[buyer_agent] ** ec_alpha) * (buyer_agent.get_current_reputation() ** reputation_alpha)
             buyer2ec[buyer_agent] = ec_full[buyer_agent]
+            buyer2degree[buyer_agent] = self.graph.degree(buyer_agent)
 
         num_total_buyers = len(self.buyer_agents)
         num_total_sellers = len(self.seller_agents)
+
+        # compute power-law fit and distance from fit to empirical distribution
+        # for the seller degree distribution
+        seller_degrees = np.asarray(list(seller2degree.values()))
+        params = stats.powerlaw.fit(seller_degrees)
 
         self.graph_evolution_metrics.append({
             'time_step': self.current_time_step,
@@ -351,11 +362,13 @@ class NoshGraphSimulation:
             'seller2eigenvectorcentrality': seller2ec,
             'seller2weight': seller2weight,
             'seller2totalweight': seller2totalweight,
+            'seller2degree': seller2degree,
             'buyer2value': buyer2value,
             'buyer2eigenvectorcentrality': buyer2ec,
             'buyer2weight': buyer2weight,
             'buyer2totalweight': buyer2totalweight,
-            'total_supply': self.total_supply,
+            'buyer2degree': buyer2degree,
+            'total_supply': self.total_minted_tokens,
             'buyer_agent_id_counter': self.buyer_agent_id_counter,
             'seller_agent_id_counter': self.seller_agent_id_counter,
             'num_total_buyers': num_total_buyers,
