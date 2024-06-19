@@ -6,6 +6,8 @@ import subprocess
 import numpy as np
 from tqdm.auto import tqdm
 import scipy.stats as stats
+from scipy.linalg import norm
+from scipy.spatial.distance import euclidean
 
 from nosh.buyer_agent import BuyerAgent
 from nosh.producer_agent import SellerAgent
@@ -15,6 +17,51 @@ def mt_linear(gt, t, m=1):
 
 def mt_exp(gt, t, alpha=0.05):
     return gt * np.exp(alpha*t)
+
+def kld(p,q):
+    assert len(p) == len(q)
+    # assume they are defined on the same sample space
+    kl = 0
+    for ii in range(len(p)):
+        if p[ii] > 0 and q[ii] > 0:
+            kl += p[ii] * np.log(p[ii]/q[ii])
+    return kl
+
+# https://gist.github.com/larsmans/3116927
+_SQRT2 = np.sqrt(2)     # sqrt(2) with default precision np.float64
+def hellinger1(p, q):
+    return norm(np.sqrt(p) - np.sqrt(q)) / _SQRT2
+def hellinger2(p, q):
+    return euclidean(np.sqrt(p), np.sqrt(q)) / _SQRT2
+def hellinger3(p, q):
+    return np.sqrt(np.sum((np.sqrt(p) - np.sqrt(q)) ** 2)) / _SQRT2
+def hellinger22(p, q):
+    return np.sqrt(0.5 * ((np.sqrt(p) - np.sqrt(q))**2).sum())
+
+def fit_powerlaw_compute_distance(data):
+    MAX_DIST = 2
+    
+    fit_params = stats.powerlaw.fit(data)
+    # loc/scale normalize
+    seller_degrees_normalized = (data - fit_params[1]) / fit_params[2]
+
+    
+
+    hist, bins = np.histogram(seller_degrees_normalized,
+                              bins=25, range=(0, np.max(data)), density=True)
+    x = bins[0:-1]
+    pdff = stats.powerlaw.pdf(x, fit_params[0])
+    dist = hellinger22(hist, pdff)
+    if dist > 10:
+        print('H > 10!!')
+        print(data)
+        print(seller_degrees_normalized)
+        print(hist)
+        print(pdff)
+        print('Distance -->', dist)
+        # raise ValueError("Hellinger distance is greater than 1!")
+    return dist
+
 
 class NoshGraphSimulation:
     def __init__(
@@ -354,7 +401,12 @@ class NoshGraphSimulation:
         # compute power-law fit and distance from fit to empirical distribution
         # for the seller degree distribution
         seller_degrees = np.asarray(list(seller2degree.values()))
-        params = stats.powerlaw.fit(seller_degrees)
+        seller_powerlaw_dist = fit_powerlaw_compute_distance(seller_degrees)
+        # if seller_powerlaw_dist > 1:
+        #     print(seller_degrees)
+        #     print('Distance -->', seller_powerlaw_dist)
+        #     raise ValueError("Hellinger distance is greater than 1!")
+
 
         self.graph_evolution_metrics.append({
             'time_step': self.current_time_step,
@@ -363,6 +415,7 @@ class NoshGraphSimulation:
             'seller2weight': seller2weight,
             'seller2totalweight': seller2totalweight,
             'seller2degree': seller2degree,
+            'seller_powerlaw_dist': seller_powerlaw_dist,
             'buyer2value': buyer2value,
             'buyer2eigenvectorcentrality': buyer2ec,
             'buyer2weight': buyer2weight,
