@@ -60,8 +60,8 @@ class Agent:
         return self.reputation_vector[-1]
     
     def compute_transaction_value(self, counterparty_node):
-        return self.rng.gamma(
-            shape=self.transaction_draw_kwargs['shape'],
-            scale=self.transaction_draw_kwargs['scale']
-        )
-        # return 1  # can be usefl to isolate effects ... TODO: programmatically control this
+        # return self.rng.gamma(
+        #     shape=self.transaction_draw_kwargs['shape'],
+        #     scale=self.transaction_draw_kwargs['scale']
+        # )
+        return 1  # can be usefl to isolate effects ... TODO: programmatically control this

@@ -1,3 +1,4 @@
+from typing import Union, Callable
 import networkx as nx
 
 import os
@@ -35,32 +36,46 @@ def hellinger2(p, q):
     return euclidean(np.sqrt(p), np.sqrt(q)) / _SQRT2
 def hellinger3(p, q):
     return np.sqrt(np.sum((np.sqrt(p) - np.sqrt(q)) ** 2)) / _SQRT2
-def hellinger22(p, q):
-    return np.sqrt(0.5 * ((np.sqrt(p) - np.sqrt(q))**2).sum())
+# def hellinger22(p, q):
+#     return np.sqrt(0.5 * ((np.sqrt(p) - np.sqrt(q))**2).sum())
 
-def fit_powerlaw_compute_distance(data):
-    MAX_DIST = 2
-    
-    fit_params = stats.powerlaw.fit(data)
-    # loc/scale normalize
-    seller_degrees_normalized = (data - fit_params[1]) / fit_params[2]
+def degree_distribution(graph):
+    degree_counts = nx.degree_histogram(graph)  # Count of nodes with each degree
 
-    
+    # Normalize to get the probability distribution
+    total_nodes = nx.number_of_nodes(graph)
+    degree_distribution = [count / total_nodes for count in degree_counts]
 
-    hist, bins = np.histogram(seller_degrees_normalized,
-                              bins=25, range=(0, np.max(data)), density=True)
-    x = bins[0:-1]
-    pdff = stats.powerlaw.pdf(x, fit_params[0])
-    dist = hellinger22(hist, pdff)
-    if dist > 10:
-        print('H > 10!!')
-        print(data)
-        print(seller_degrees_normalized)
-        print(hist)
-        print(pdff)
-        print('Distance -->', dist)
-        # raise ValueError("Hellinger distance is greater than 1!")
+    # # Optionally, you can filter out zero entries for a more compact representation
+    # degree_distribution = [count for count in degree_distribution if count > 0]
+
+    return degree_distribution
+
+def fit_powerlaw_compute_distance(G):
+    dd = degree_distribution(G)
+    fit_params = stats.powerlaw.fit(dd)
+    pdff = stats.powerlaw.pdf(dd, fit_params[0])
+    dist = hellinger2(dd, pdff)
+    if dist > 1:
+        raise ValueError("Hellinger distance is greater than 1!")
     return dist
+
+# def fit_powerlaw_compute_distance(data):
+#     nbins=20
+    
+#     fit_params = stats.powerlaw.fit(data)
+#     seller_degrees_normalized = (data - fit_params[1]) / fit_params[2]
+    
+#     hist, bins = np.histogram(seller_degrees_normalized,
+#                               bins=nbins, 
+#                               #range=(0, np.max(data)), 
+#                               density=True)
+#     x = bins[0:-1]
+#     pdff = stats.powerlaw.pdf(x, fit_params[0])
+#     dist = hellinger2(hist/np.sum(hist), pdff/np.sum(pdff))
+#     if dist > 1:
+#         raise ValueError("Hellinger distance is greater than 1!")
+#     return dist
 
 
 class NoshGraphSimulation:
@@ -287,14 +302,15 @@ class NoshGraphSimulation:
             num_time_steps: int,
             add_delete_maintain_probs: np.ndarray,
             weight_alpha_vec: np.ndarray,
-            ec_alpha_vec: np.ndarray,
+            ec_alpha_vec_or_fn: Union[np.ndarray, Callable],
             reputation_alpha_vec: np.ndarray,
             create_video:bool=False,
             verbose:bool=False
         ):
         assert add_delete_maintain_probs.shape == (num_time_steps,3), "add_delete_maintain_probs must be a 2D array of length 3"
         assert weight_alpha_vec.shape == (num_time_steps,), "weight_alpha_vec must be a 1D array of length num_time_steps"
-        assert ec_alpha_vec.shape == (num_time_steps,), "ec_alpha_vec must be a 1D array of length num_time_steps"
+        if isinstance(ec_alpha_vec_or_fn, np.ndarray):
+            assert ec_alpha_vec_or_fn.shape == (num_time_steps,), "ec_alpha_vec must be a 1D array of length num_time_steps"
         assert reputation_alpha_vec.shape == (num_time_steps,), "reputation_alpha_vec must be a 1D array of length num_time_steps"
 
         if create_video:
@@ -303,7 +319,16 @@ class NoshGraphSimulation:
                 os.makedirs(frame_folder, exist_ok=True)
 
         for ii in tqdm(range(num_time_steps), disable = not verbose):
-            self.record_graph_metrics(weight_alpha_vec[ii], ec_alpha_vec[ii], reputation_alpha_vec[ii])
+            if callable(ec_alpha_vec_or_fn):
+                if len(self.graph_evolution_metrics) > 0:
+                    ec_alpha = ec_alpha_vec_or_fn(self.graph_evolution_metrics[-1])
+                else:
+                    ec_alpha = ec_alpha_vec_or_fn(None)
+            elif isinstance(ec_alpha_vec_or_fn, np.ndarray):
+                ec_alpha = ec_alpha_vec_or_fn[ii]
+            else:
+                raise ValueError("ec_alpha_vec must be a 1D array or a callable function")
+            self.record_graph_metrics(weight_alpha_vec[ii], ec_alpha, reputation_alpha_vec[ii])
             self.evolve_graph(add_delete_maintain_probs[ii,:])
             self.current_time_step += 1
 
@@ -335,10 +360,18 @@ class NoshGraphSimulation:
                 tol=1e-1,
                 weight='seller_weight'
             )
+            # do min/max normalization to set EC values between 0 and 1
+            # min_ec = min(ec_full.values())
+            # max_ec = max(ec_full.values())
+            # print(ec_full)
+            # print(min_ec, max_ec)
+            # ec_full = {node: (ec_full[node] - min_ec) / (max_ec - min_ec) for node in ec_full}
         except nx.PowerIterationFailedConvergence:
             print('Convergence Failed! Setting all EC values to 0')
             ec_full = {node: 0 for node in self.graph.nodes()}
         
+        total_graph_value = 0
+
         seller_agents = list(self.seller_agents.values())
         seller2value = {}
         seller2weight = {}
@@ -361,11 +394,14 @@ class NoshGraphSimulation:
                 sellers_buyer2weight[buyer_agent] = w
                 total_weight += w
 
+            seller_ec = ec_full[seller_agent] + 1  # min-value=1
             seller2weight[seller_agent] = sellers_buyer2weight
             seller2totalweight[seller_agent] = total_weight
-            seller2value[seller_agent] = (total_weight ** weight_alpha) * (ec_full[seller_agent] ** ec_alpha) * (seller_agent.get_current_reputation() ** reputation_alpha)
+            tv = (total_weight ** weight_alpha) * (seller_ec ** ec_alpha) * (seller_agent.get_current_reputation() ** reputation_alpha)
+            seller2value[seller_agent] = tv
             seller2ec[seller_agent] = ec_full[seller_agent]
             seller2degree[seller_agent] = self.graph.degree(seller_agent)
+            total_graph_value += tv
 
         buyer_agents = list(self.seller_agents.values())
         buyer2value = {}
@@ -389,11 +425,14 @@ class NoshGraphSimulation:
                 buyers_seller2weight[buyer_agent] = w
                 total_weight += w
 
+            buyer_ec = ec_full[buyer_agent] + 1  # min-value=1
             buyer2weight[buyer_agent] = buyers_seller2weight
             buyer2totalweight[buyer_agent] = total_weight
-            buyer2value[buyer_agent] = (total_weight ** weight_alpha) * (ec_full[buyer_agent] ** ec_alpha) * (buyer_agent.get_current_reputation() ** reputation_alpha)
+            tv = (total_weight ** weight_alpha) * (buyer_ec ** ec_alpha) * (buyer_agent.get_current_reputation() ** reputation_alpha)
+            buyer2value[buyer_agent] = tv
             buyer2ec[buyer_agent] = ec_full[buyer_agent]
             buyer2degree[buyer_agent] = self.graph.degree(buyer_agent)
+            total_graph_value += tv
 
         num_total_buyers = len(self.buyer_agents)
         num_total_sellers = len(self.seller_agents)
@@ -401,12 +440,8 @@ class NoshGraphSimulation:
         # compute power-law fit and distance from fit to empirical distribution
         # for the seller degree distribution
         seller_degrees = np.asarray(list(seller2degree.values()))
-        seller_powerlaw_dist = fit_powerlaw_compute_distance(seller_degrees)
-        # if seller_powerlaw_dist > 1:
-        #     print(seller_degrees)
-        #     print('Distance -->', seller_powerlaw_dist)
-        #     raise ValueError("Hellinger distance is greater than 1!")
-
+        # seller_powerlaw_dist = fit_powerlaw_compute_distance(seller_degrees)
+        seller_powerlaw_dist = fit_powerlaw_compute_distance(self.graph)
 
         self.graph_evolution_metrics.append({
             'time_step': self.current_time_step,
@@ -425,5 +460,9 @@ class NoshGraphSimulation:
             'buyer_agent_id_counter': self.buyer_agent_id_counter,
             'seller_agent_id_counter': self.seller_agent_id_counter,
             'num_total_buyers': num_total_buyers,
-            'num_total_sellers': num_total_sellers
+            'num_total_sellers': num_total_sellers,
+            'weight_alpha': weight_alpha,
+            'ec_alpha': ec_alpha,
+            'reputation_alpha': reputation_alpha,
+            'total_graph_value': total_graph_value
         })
