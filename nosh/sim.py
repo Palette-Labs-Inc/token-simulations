@@ -9,6 +9,7 @@ from tqdm.auto import tqdm
 import scipy.stats as stats
 from scipy.linalg import norm
 from scipy.spatial.distance import euclidean
+import powerlaw
 
 from nosh.buyer_agent import BuyerAgent
 from nosh.producer_agent import SellerAgent
@@ -28,55 +29,30 @@ def kld(p,q):
             kl += p[ii] * np.log(p[ii]/q[ii])
     return kl
 
-# https://gist.github.com/larsmans/3116927
-_SQRT2 = np.sqrt(2)     # sqrt(2) with default precision np.float64
-def hellinger1(p, q):
-    return norm(np.sqrt(p) - np.sqrt(q)) / _SQRT2
-def hellinger2(p, q):
-    return euclidean(np.sqrt(p), np.sqrt(q)) / _SQRT2
-def hellinger3(p, q):
-    return np.sqrt(np.sum((np.sqrt(p) - np.sqrt(q)) ** 2)) / _SQRT2
-# def hellinger22(p, q):
-#     return np.sqrt(0.5 * ((np.sqrt(p) - np.sqrt(q))**2).sum())
-
-def degree_distribution(graph):
-    degree_counts = nx.degree_histogram(graph)  # Count of nodes with each degree
-
-    # Normalize to get the probability distribution
-    total_nodes = nx.number_of_nodes(graph)
-    degree_distribution = [count / total_nodes for count in degree_counts]
-
-    # # Optionally, you can filter out zero entries for a more compact representation
-    # degree_distribution = [count for count in degree_distribution if count > 0]
-
-    return degree_distribution
-
+# def fit_powerlaw_compute_distance(degrees):
+#     try:
+#         fit = powerlaw.Fit(degrees+1, discrete=True, xmin=1)
+#         # get distance between fit and theoretical
+#         dist = fit.power_law.KS()
+#         return dist
+#     except Exception as e:
+#         print(e)
+#         return 1
 def fit_powerlaw_compute_distance(G):
-    dd = degree_distribution(G)
-    fit_params = stats.powerlaw.fit(dd)
-    pdff = stats.powerlaw.pdf(dd, fit_params[0])
-    dist = hellinger2(dd, pdff)
-    if dist > 1:
-        raise ValueError("Hellinger distance is greater than 1!")
-    return dist
-
-# def fit_powerlaw_compute_distance(data):
-#     nbins=20
-    
-#     fit_params = stats.powerlaw.fit(data)
-#     seller_degrees_normalized = (data - fit_params[1]) / fit_params[2]
-    
-#     hist, bins = np.histogram(seller_degrees_normalized,
-#                               bins=nbins, 
-#                               #range=(0, np.max(data)), 
-#                               density=True)
-#     x = bins[0:-1]
-#     pdff = stats.powerlaw.pdf(x, fit_params[0])
-#     dist = hellinger2(hist/np.sum(hist), pdff/np.sum(pdff))
-#     if dist > 1:
-#         raise ValueError("Hellinger distance is greater than 1!")
-#     return dist
-
+    degree_distribution = nx.degree_histogram(G)
+    try:
+        print(degree_distribution)
+        fit = powerlaw.Fit(degree_distribution, discrete=True, xmin=1)
+        print(fit.power_law.alpha, fit.power_law.KS())
+        # get distance between fit and theoretical
+        dist = fit.power_law.KS()
+        if dist == np.nan:
+            return 1
+        return dist
+    except Exception as e:
+        print(e)
+        print(degree_distribution)
+        return 1
 
 class NoshGraphSimulation:
     def __init__(
