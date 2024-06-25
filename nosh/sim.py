@@ -10,6 +10,7 @@ import scipy.stats as stats
 from scipy.linalg import norm
 from scipy.spatial.distance import euclidean
 import powerlaw
+import scipy.stats
 
 from nosh.buyer_agent import BuyerAgent
 from nosh.producer_agent import SellerAgent
@@ -29,7 +30,7 @@ def kld(p,q):
             kl += p[ii] * np.log(p[ii]/q[ii])
     return kl
 
-# def fit_powerlaw_compute_distance(degrees):
+# def network_state_fn(degrees):
 #     try:
 #         fit = powerlaw.Fit(degrees+1, discrete=True, xmin=1)
 #         # get distance between fit and theoretical
@@ -38,21 +39,27 @@ def kld(p,q):
 #     except Exception as e:
 #         print(e)
 #         return 1
-def fit_powerlaw_compute_distance(G):
-    degree_distribution = nx.degree_histogram(G)
-    try:
-        print(degree_distribution)
-        fit = powerlaw.Fit(degree_distribution, discrete=True, xmin=1)
-        print(fit.power_law.alpha, fit.power_law.KS())
-        # get distance between fit and theoretical
-        dist = fit.power_law.KS()
-        if dist == np.nan:
-            return 1
-        return dist
-    except Exception as e:
-        print(e)
-        print(degree_distribution)
-        return 1
+# def network_state_fn(G):
+#     degree_distribution = nx.degree_histogram(G)
+#     try:
+#         # print(degree_distribution)
+#         fit = powerlaw.Fit(degree_distribution, discrete=True, xmin=1)
+#         # print(fit.power_law.alpha, fit.power_law.KS())
+#         # get distance between fit and theoretical
+#         dist = fit.power_law.KS()
+#         if dist == np.nan:
+#             return 1
+#         return dist
+#     except Exception as e:
+#         # print(e)
+#         # print(degree_distribution)
+#         return 1
+def network_state_fn(G):
+    # compute kurtosis as a proxy for network state
+    degrees = np.asarray(list(dict(G.degree()).values()))
+    kurtosis_value = scipy.stats.kurtosis(degrees)
+    return kurtosis_value
+
 
 class NoshGraphSimulation:
     def __init__(
@@ -278,7 +285,7 @@ class NoshGraphSimulation:
             num_time_steps: int,
             add_delete_maintain_probs: np.ndarray,
             weight_alpha_vec: np.ndarray,
-            ec_alpha_vec_or_fn: Union[np.ndarray, Callable],
+            ec_alpha_vec_or_fn: Union[np.ndarray, Callable, str],
             reputation_alpha_vec: np.ndarray,
             create_video:bool=False,
             verbose:bool=False
@@ -302,8 +309,13 @@ class NoshGraphSimulation:
                     ec_alpha = ec_alpha_vec_or_fn(None)
             elif isinstance(ec_alpha_vec_or_fn, np.ndarray):
                 ec_alpha = ec_alpha_vec_or_fn[ii]
+            elif isinstance(ec_alpha_vec_or_fn, str):
+                if ec_alpha_vec_or_fn == 'dynamic':
+                    ec_alpha = 'dynamic'
+                else:
+                    raise ValueError("ec_alpha_vec must be a 1D array or a callable function or string[dynamic]")
             else:
-                raise ValueError("ec_alpha_vec must be a 1D array or a callable function")
+                raise ValueError("ec_alpha_vec must be a 1D array or a callable function or string")
             self.record_graph_metrics(weight_alpha_vec[ii], ec_alpha, reputation_alpha_vec[ii])
             self.evolve_graph(add_delete_maintain_probs[ii,:])
             self.current_time_step += 1
@@ -325,6 +337,10 @@ class NoshGraphSimulation:
         return self.graph_evolution_metrics
     
     def record_graph_metrics(self, weight_alpha, ec_alpha, reputation_alpha):
+
+        def alpha(ec):
+            return 1-ec
+
         # compute eigenvector centrality for all the nodes in the graph
         try:
             # NOTE: this computes the EC using an adjacency matrix with binary entries
@@ -336,12 +352,16 @@ class NoshGraphSimulation:
                 tol=1e-1,
                 weight='seller_weight'
             )
+            
             # do min/max normalization to set EC values between 0 and 1
-            # min_ec = min(ec_full.values())
-            # max_ec = max(ec_full.values())
-            # print(ec_full)
-            # print(min_ec, max_ec)
-            # ec_full = {node: (ec_full[node] - min_ec) / (max_ec - min_ec) for node in ec_full}
+            if ec_alpha == 'dynamic':
+                min_ec = min(ec_full.values())
+                max_ec = max(ec_full.values())
+                for node in ec_full:
+                    if np.isclose(min_ec, max_ec):
+                        ec_full[node] = 0
+                    else:
+                        ec_full[node] = (ec_full[node] - min_ec) / (max_ec - min_ec)
         except nx.PowerIterationFailedConvergence:
             print('Convergence Failed! Setting all EC values to 0')
             ec_full = {node: 0 for node in self.graph.nodes()}
@@ -373,7 +393,11 @@ class NoshGraphSimulation:
             seller_ec = ec_full[seller_agent] + 1  # min-value=1
             seller2weight[seller_agent] = sellers_buyer2weight
             seller2totalweight[seller_agent] = total_weight
-            tv = (total_weight ** weight_alpha) * (seller_ec ** ec_alpha) * (seller_agent.get_current_reputation() ** reputation_alpha)
+            
+            # tv = (total_weight ** weight_alpha) * (seller_ec ** ec_alpha) * (seller_agent.get_current_reputation() ** reputation_alpha)
+            aa = alpha(seller_ec)
+            tv = (total_weight ** (1-aa)) * (seller_ec ** aa) * (seller_agent.get_current_reputation() ** reputation_alpha)
+            
             seller2value[seller_agent] = tv
             seller2ec[seller_agent] = ec_full[seller_agent]
             seller2degree[seller_agent] = self.graph.degree(seller_agent)
@@ -404,7 +428,11 @@ class NoshGraphSimulation:
             buyer_ec = ec_full[buyer_agent] + 1  # min-value=1
             buyer2weight[buyer_agent] = buyers_seller2weight
             buyer2totalweight[buyer_agent] = total_weight
-            tv = (total_weight ** weight_alpha) * (buyer_ec ** ec_alpha) * (buyer_agent.get_current_reputation() ** reputation_alpha)
+            
+            # tv = (total_weight ** weight_alpha) * (buyer_ec ** ec_alpha) * (buyer_agent.get_current_reputation() ** reputation_alpha)
+            aa = alpha(seller_ec)
+            tv = (total_weight ** (1-aa)) * (buyer_ec ** aa) * (buyer_agent.get_current_reputation() ** reputation_alpha)
+
             buyer2value[buyer_agent] = tv
             buyer2ec[buyer_agent] = ec_full[buyer_agent]
             buyer2degree[buyer_agent] = self.graph.degree(buyer_agent)
@@ -415,9 +443,10 @@ class NoshGraphSimulation:
 
         # compute power-law fit and distance from fit to empirical distribution
         # for the seller degree distribution
-        seller_degrees = np.asarray(list(seller2degree.values()))
+        # seller_degrees = np.asarray(list(seller2degree.values()))
         # seller_powerlaw_dist = fit_powerlaw_compute_distance(seller_degrees)
-        seller_powerlaw_dist = fit_powerlaw_compute_distance(self.graph)
+        # seller_powerlaw_dist = fit_powerlaw_compute_distance(self.graph)
+        network_state = network_state_fn(self.graph)
 
         self.graph_evolution_metrics.append({
             'time_step': self.current_time_step,
@@ -426,7 +455,7 @@ class NoshGraphSimulation:
             'seller2weight': seller2weight,
             'seller2totalweight': seller2totalweight,
             'seller2degree': seller2degree,
-            'seller_powerlaw_dist': seller_powerlaw_dist,
+            'network_state': network_state,
             'buyer2value': buyer2value,
             'buyer2eigenvectorcentrality': buyer2ec,
             'buyer2weight': buyer2weight,
@@ -440,5 +469,6 @@ class NoshGraphSimulation:
             'weight_alpha': weight_alpha,
             'ec_alpha': ec_alpha,
             'reputation_alpha': reputation_alpha,
+            'alpha': aa,
             'total_graph_value': total_graph_value
         })
