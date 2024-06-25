@@ -362,6 +362,10 @@ class NoshGraphSimulation:
                         ec_full[node] = 0
                     else:
                         ec_full[node] = (ec_full[node] - min_ec) / (max_ec - min_ec)
+                
+                min_ec = min(ec_full.values())
+                max_ec = max(ec_full.values())
+                assert min_ec >= 0 and max_ec <= 1, f"min_ec: {min_ec}, max_ec: {max_ec}"
         except nx.PowerIterationFailedConvergence:
             print('Convergence Failed! Setting all EC values to 0')
             ec_full = {node: 0 for node in self.graph.nodes()}
@@ -374,6 +378,7 @@ class NoshGraphSimulation:
         seller2totalweight = {}
         seller2ec = {}
         seller2degree = {}
+        aa_seller = 0
         for seller_agent in seller_agents:
             buyer_edges = self.graph.edges(seller_agent, data=True)
             sellers_buyer2weight = {}
@@ -390,14 +395,20 @@ class NoshGraphSimulation:
                 sellers_buyer2weight[buyer_agent] = w
                 total_weight += w
 
-            seller_ec = ec_full[seller_agent] + 1  # min-value=1
+            seller_ec = ec_full[seller_agent] #+ 1  # min-value=1
             seller2weight[seller_agent] = sellers_buyer2weight
             seller2totalweight[seller_agent] = total_weight
             
-            # tv = (total_weight ** weight_alpha) * (seller_ec ** ec_alpha) * (seller_agent.get_current_reputation() ** reputation_alpha)
-            aa = alpha(seller_ec)
-            tv = (total_weight ** (1-aa)) * (seller_ec ** aa) * (seller_agent.get_current_reputation() ** reputation_alpha)
             
+            if ec_alpha == 'dynamic':
+                assert seller_ec >= 0 and seller_ec <= 1, f"seller_ec: {seller_ec}"
+                aa_seller = alpha(seller_ec)
+                assert aa_seller >= 0 and aa_seller <= 1, f"aa: {aa_seller}"
+                tv = (total_weight ** (1-aa_seller)) * (seller_ec ** aa_seller) * (seller_agent.get_current_reputation() ** reputation_alpha)
+            else:
+                tv = (total_weight ** weight_alpha) * (seller_ec ** ec_alpha) * (seller_agent.get_current_reputation() ** reputation_alpha)
+                aa = ec_alpha
+
             seller2value[seller_agent] = tv
             seller2ec[seller_agent] = ec_full[seller_agent]
             seller2degree[seller_agent] = self.graph.degree(seller_agent)
@@ -425,13 +436,16 @@ class NoshGraphSimulation:
                 buyers_seller2weight[buyer_agent] = w
                 total_weight += w
 
-            buyer_ec = ec_full[buyer_agent] + 1  # min-value=1
+            buyer_ec = ec_full[buyer_agent] #+ 1  # min-value=1
             buyer2weight[buyer_agent] = buyers_seller2weight
             buyer2totalweight[buyer_agent] = total_weight
             
-            # tv = (total_weight ** weight_alpha) * (buyer_ec ** ec_alpha) * (buyer_agent.get_current_reputation() ** reputation_alpha)
-            aa = alpha(seller_ec)
-            tv = (total_weight ** (1-aa)) * (buyer_ec ** aa) * (buyer_agent.get_current_reputation() ** reputation_alpha)
+            if ec_alpha == 'dynamic':
+                aa = alpha(seller_ec)
+                tv = (total_weight ** (1-aa)) * (buyer_ec ** aa) * (buyer_agent.get_current_reputation() ** reputation_alpha)
+            else:
+                tv = (total_weight ** weight_alpha) * (buyer_ec ** ec_alpha) * (buyer_agent.get_current_reputation() ** reputation_alpha)
+                aa = ec_alpha
 
             buyer2value[buyer_agent] = tv
             buyer2ec[buyer_agent] = ec_full[buyer_agent]
@@ -469,6 +483,6 @@ class NoshGraphSimulation:
             'weight_alpha': weight_alpha,
             'ec_alpha': ec_alpha,
             'reputation_alpha': reputation_alpha,
-            'alpha': aa,
+            'alpha': aa_seller,
             'total_graph_value': total_graph_value
         })
