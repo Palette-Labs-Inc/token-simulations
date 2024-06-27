@@ -363,6 +363,7 @@ class NoshGraphSimulation:
                     else:
                         ec_full[node] = (ec_full[node] - min_ec) / (max_ec - min_ec)
                 
+                # NOTE: error checking, but can remove as we gain confidence in implementation
                 min_ec = min(ec_full.values())
                 max_ec = max(ec_full.values())
                 assert min_ec >= 0 and max_ec <= 1, f"min_ec: {min_ec}, max_ec: {max_ec}"
@@ -395,7 +396,7 @@ class NoshGraphSimulation:
                 sellers_buyer2weight[buyer_agent] = w
                 total_weight += w
 
-            seller_ec = ec_full[seller_agent] #+ 1  # min-value=1
+            seller_ec = ec_full[seller_agent]
             seller2weight[seller_agent] = sellers_buyer2weight
             seller2totalweight[seller_agent] = total_weight
             
@@ -436,7 +437,7 @@ class NoshGraphSimulation:
                 buyers_seller2weight[buyer_agent] = w
                 total_weight += w
 
-            buyer_ec = ec_full[buyer_agent] #+ 1  # min-value=1
+            buyer_ec = ec_full[buyer_agent]
             buyer2weight[buyer_agent] = buyers_seller2weight
             buyer2totalweight[buyer_agent] = total_weight
             
